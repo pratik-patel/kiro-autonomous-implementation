@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "name": " Local Quality Gate",
+  "description": "Validates code against SonarLint rules before pushing to git repository",
+  "version": "1",
+  "when": {
+    "type": "agentStop",
+    "patterns": ["**/*.java"]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "Run SonarLint analysis on the modified files and report any issues found. If issues are detected, provide recommendations for fixes before pushing to git."
+  },
+  "workspaceFolderName": "koro-spec",
+  "shortName": "sonarlint-pre-push"
+}

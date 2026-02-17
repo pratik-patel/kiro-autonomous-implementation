@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "name": "Format & Lint on Save",
+  "description": "Runs formatter and linter on code file saves for fast feedback. Executes prettier/eslint for JS/TS, Java and Database files",
+  "version": "1",
+  "when": {
+    "type": "agentStop",
+    "patterns": ["**/*.java"]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "Run SonarLint analysis on the modified files and report any issues found. If issues are detected, provide recommendations for fixes before pushing to git."
+  },
+  "workspaceFolderName": "koro-spec",
+  "shortName": "format-lint-on-save"
+}

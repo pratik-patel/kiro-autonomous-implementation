@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "name": "Design template enforcement",
+  "description": "Enforces design.md completeness by checking for required sections (Architecture overview, Data model/API contracts, AuthN/AuthZ, Error handling + observability, Performance considerations, Test strategy, Rollout plan + backwards compatibility). Auto-fills missing sections with TODO stubs.",
+  "version": "1",
+  "when": {
+    "type": "fileEdited",
+    "patterns": [
+      "design.md"
+    ]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "Check if design.md contains all required sections: Architecture overview, Data model / API contracts, AuthN/AuthZ, Error handling + observability, Performance considerations, Test strategy, and Rollout plan + backwards compatibility. For any missing sections, add them with TODO stubs so the author knows what needs to be filled in."
+  }
+}

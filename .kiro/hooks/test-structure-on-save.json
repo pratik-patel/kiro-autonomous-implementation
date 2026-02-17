@@ -1,0 +1,13 @@
+{
+  "name": "Test Structure Validation on Save",
+  "version": "1.0.0",
+  "description": "Fast validation of test structure when test files are saved: AAA/GWT markers, spec traceability, assertions, and anti-patterns",
+  "when": {
+    "type": "fileEdited",
+    "patterns": ["src/test/java/**/*.java"]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "Validate the saved test file against our Spring Boot + JUnit testing standards. Run the test structure validator script at .kiro/scripts/validate-test-structure.sh to check for: 1) AAA or Given-When-Then markers in each @Test method, 2) Spec traceability (@Tag, @DisplayName, or comment with SPEC/AC reference), 3) At least one assertion per test, 4) No Thread.sleep(), System.out/err, or @Disabled without ticket reference. Report any violations with file path, method name, rule violated, and fix guidance."
+  }
+}

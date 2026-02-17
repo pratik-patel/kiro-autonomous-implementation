@@ -1,0 +1,13 @@
+{
+  "enabled": true,
+  "name": "Enforce Spec & Security for Feature Prompts",
+  "description": "Prevents feature implementation prompts that aren't anchored to a spec and blocks harmful commands and sensitive data exposure",
+  "version": "2",
+  "when": {
+    "type": "promptSubmit"
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "SECURITY CHECK ONLY (do not apply spec enforcement unless user explicitly asks for implementation):\n\n1. SECURITY CHECK - BLOCK if prompt contains:\n   - Destructive commands: rm -rf, rm -r, delete, truncate, drop table, destroy, wipe, format, clear (with file paths)\n   - Sensitive data patterns: SSN (###-##-####), credit card (####-####-####), API keys, tokens, passwords, private keys, database credentials\n   - PII: full names with addresses, phone numbers with context, email+password combinations\n   - If any harmful content detected, REJECT with: \"SECURITY BLOCK: This prompt contains [specific risk]. Please remove [harmful element] and resubmit.\"\n\n2. NORMAL FLOW - If prompt passes security check and is NOT asking to implement/build/refactor code, proceed normally without spec enforcement.\n\n3. SPEC ENFORCEMENT (only if user asks to implement/add/build/refactor/change behavior):\n   - Verify user is working inside an active #spec context OR has provided a spec path (e.g., .kiro/specs/<name>/)\n   - If neither condition is met, respond with \"Create/update requirements first\" and generate a requirements skeleton based on the prompt intent\n   - If spec context exists, proceed with implementation\n\nAlways prioritize security checks. Only apply spec enforcement for implementation requests."
+  }
+}
