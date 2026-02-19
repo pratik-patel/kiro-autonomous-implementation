@@ -494,8 +494,8 @@ Create an actionable implementation plan with a checklist of coding tasks based 
 **This workflow is ONLY for creating design and planning artifacts.**
 
 - You MUST NOT attempt to implement the feature as part of this workflow
-- You MUST inform the user that the spec workflow is complete once all three artifacts are created
-- You MUST inform the user they can begin executing tasks by opening `tasks.md`
+- You MUST inform the user that the spec workflow is complete once all three artifacts are created and pushed to Jira
+- You MUST inform the user they can begin executing tasks by saying "run all tasks" — tasks will be read from Jira, not from `tasks.md`
 
 ## Workflow Diagram
 

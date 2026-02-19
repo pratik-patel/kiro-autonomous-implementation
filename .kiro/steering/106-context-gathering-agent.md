@@ -147,8 +147,8 @@ Focus on:
 
 ### For Orchestrator Agent (`workflow-orchestrator`)
 Focus on:
-- `.kiro/specs/{feature_name}/` directory contents (existing specs)
-- `tasks.md` status (which tasks are complete/incomplete)
+- `.kiro/specs/{feature_name}/` directory contents (existing specs for design context)
+- Jira Epic status (which tasks are complete/incomplete — Jira is source of truth, NOT `tasks.md`)
 - Project structure overview (top-level directories)
 - Build/test configuration (`pom.xml`, test frameworks)
 

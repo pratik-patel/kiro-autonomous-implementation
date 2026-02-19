@@ -6,41 +6,41 @@ This plan implements the LDC Loan Review Workflow as a callback-driven AWS Step 
 
 ## Tasks
 
-- [ ] 1. Project setup and core domain models
-  - [ ] 1.1 Create Maven project structure with Spring Boot 3.x, AWS SDK, jqwik, and Lombok dependencies
+- [x] 1. Project setup and core domain models
+  - [x] 1.1 Create Maven project structure with Spring Boot 3.x, AWS SDK, jqwik, and Lombok dependencies
     - Set up `pom.xml` with Java 17, Spring Boot 3.x starter, AWS Lambda, DynamoDB SDK, Step Functions SDK, jqwik, JUnit 5, Mockito, AssertJ, MapStruct, Lombok
     - Create package structure: `config`, `controller`, `service`, `model`, `repository`, `exception`, `util`
     - _Requirements: Project infrastructure_
 
-  - [ ] 1.2 Implement enums: `RequestType`, `AttributeStatus`, `WorkflowStatus`
+  - [x] 1.2 Implement enums: `RequestType`, `AttributeStatus`, `WorkflowStatus`
     - `RequestType`: LDC, SEC_POLICY, CONDUIT (with display value mapping for "Sec Policy")
     - `AttributeStatus`: PENDING_REVIEW, APPROVED, REJECTED, REPURCHASE, RECLASS
     - `WorkflowStatus`: INITIALIZED, REVIEW_TYPE_ASSIGNED, DECISION_PENDING, APPROVED, REJECTED, PARTIALLY_APPROVED, REPURCHASE, RECLASS_APPROVED, WAITING_FOR_CONFIRMATION, UPDATING_EXTERNAL_SYSTEMS, COMPLETED, FAILED
     - _Requirements: 1.4, 4.1–4.5_
 
-  - [ ] 1.3 Implement domain models: `WorkflowState`, `LoanAttribute`, `AuditTrailEntry`, `ReclassConfirmation`
+  - [x] 1.3 Implement domain models: `WorkflowState`, `LoanAttribute`, `AuditTrailEntry`, `ReclassConfirmation`
     - Use Lombok `@Data`, `@Builder` for all models
     - `WorkflowState` contains all fields from DynamoDB table design
     - `LoanAttribute` with attributeName, attributeStatus, updatedTimestamp
     - `AuditTrailEntry` with previousStatus, newStatus, timestamp, triggeringAction, correlationId
     - _Requirements: 10.1, 10.4, 8.2_
 
-  - [ ] 1.4 Implement API DTOs: `StartPPAReviewRequest`, `AssignToTypeRequest`, `GetNextStepRequest`, `LoanAttributeDto`, `WorkflowResponse`
+  - [x] 1.4 Implement API DTOs: `StartPPAReviewRequest`, `AssignToTypeRequest`, `GetNextStepRequest`, `LoanAttributeDto`, `WorkflowResponse`
     - Add Jakarta Bean Validation annotations (`@NotBlank`, `@NotNull`) on mandatory fields
     - `WorkflowResponse` includes: requestNumber, loanNumber, status, message, correlationId, taskNumber
     - _Requirements: 11.1, 11.4, 1.2, 2.3, 3.2_
 
-  - [ ] 1.5 Implement custom exception hierarchy: `WorkflowException`, `WorkflowValidationException`, `WorkflowNotFoundException`, `WorkflowPersistenceException`, `ExternalSystemException`
+  - [x] 1.5 Implement custom exception hierarchy: `WorkflowException`, `WorkflowValidationException`, `WorkflowNotFoundException`, `WorkflowPersistenceException`, `ExternalSystemException`
     - All extend `RuntimeException` (unchecked)
     - `WorkflowPersistenceException` includes operationType, tableName, errorReason fields
     - _Requirements: 9.3_
 
 - [ ] 2. DynamoDB repository layer
-  - [ ] 2.1 Implement `WorkflowRepository` interface
+  - [x] 2.1 Implement `WorkflowRepository` interface
     - Define methods: `save(WorkflowState)`, `findByRequestAndLoan(requestNumber, loanNumber)`, `findByTaskNumber(taskNumber)`, `updateStatus(requestNumber, loanNumber, status, auditEntry)`, `updateTaskToken(requestNumber, loanNumber, taskToken)`, `updateAttributes(requestNumber, loanNumber, attributes, decision)`
     - _Requirements: 10.1, 10.2, 10.3, 10.4_
 
-  - [ ] 2.2 Implement `DynamoDbWorkflowRepository`
+  - [x] 2.2 Implement `DynamoDbWorkflowRepository`
     - Use AWS DynamoDB Enhanced Client
     - Partition key: `requestNumber`, Sort key: `loanNumber`
     - GSI on `taskNumber` for callback lookups
@@ -56,7 +56,7 @@ This plan implements the LDC Loan Review Workflow as a callback-driven AWS Step 
     - _Requirements: 10.1, 10.2, 10.3, 9.3_
 
 - [ ] 3. Validation service
-  - [ ] 3.1 Implement `PayloadValidationService`
+  - [x] 3.1 Implement `PayloadValidationService`
     - Validate `startPPAreview`: mandatory fields (requestNumber, loanNumber, requestType), valid RequestType enum
     - Validate `assignToType`: mandatory fields (taskNumber, requestNumber, loanNumber, reviewType)
     - Validate `getNextStep`: mandatory fields (taskNumber, requestNumber, loanNumber, loanDecision, attributes)
