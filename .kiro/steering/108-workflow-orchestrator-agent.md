@@ -255,11 +255,25 @@ When a user requests spec creation or task execution (from an idea, Epic, or Jir
 
 > **Prerequisite**: User MUST have explicitly approved ALL three artifacts (requirements.md, design.md, tasks.md).
 
-13. **Push to Jira** — Invoke `jira-task-sync` in **Push mode**:
-    - Creates Jira Stories (one per requirement) under the target Epic
-    - Creates Jira Sub-tasks (one per task) under the appropriate Story
-    - Returns the Jira key mapping (REQ → Story key, Task → Sub-task key)
+13. **Push to Jira** — Invoke `jira-task-sync` in **Push mode**, passing all three spec files:
+    - Creates Jira Stories (one per Requirement from `requirements.md`) under the target Epic — these are business-visible
+    - Creates Jira Sub-tasks (one per task from `tasks.md`) under the corresponding Requirement's Story — these are technical implementation work
+    - Embeds full acceptance criteria from `requirements.md` and relevant design context from `design.md` into each Jira Sub-task description, making tickets **self-contained** for engineers/agents on any machine
+    - Returns the Jira key mapping (Requirement → Story key, task → Sub-task key)
 14. **Report plan** to user with Jira links and progress summary
+
+**Jira Hierarchy:**
+```
+Epic (provided by user, e.g., DMS-82)
+├── Story = Requirement 1 from requirements.md (e.g., "Submit Loan Application")
+│   ├── Sub-task = Task 1.1 from tasks.md (e.g., "Create Loan entity class")
+│   ├── Sub-task = Task 1.2 (e.g., "Create Flyway migration script")
+│   └── Sub-task = Task 1.3 (e.g., "Write unit tests for Loan entity")
+├── Story = Requirement 2 (e.g., "Credit Check Integration")
+│   ├── Sub-task = Task 2.1 (e.g., "Create CreditCheckClient")
+│   └── ...
+```
+Each Jira Sub-task description is **self-contained** — it includes the full acceptance criteria from the parent Requirement, relevant design context from `design.md`, implementation details, and Definition of Done. Engineers and agents on any machine can implement tickets using only the Jira description + `design.md`.
 
 ## Phase 1 Completion
 
@@ -315,10 +329,18 @@ When the user requests to refresh/update a design or tasks document for an exist
 
 When the user requests to execute tasks ("run all tasks", "execute all tasks", or picks a specific Jira ticket), the orchestrator reads tasks **from Jira**, not from local MD files.
 
+> **PER-TASK EXECUTION — NOT BATCH**
+>
+> "Run all tasks" means: execute tasks **one at a time**, completing the FULL pipeline (Steps 1–8) for each sub-task before starting the next one. It does NOT mean: implement all code first, then run quality gates once, then push once.
+>
+> **Each sub-task gets its own**: impact analysis → implementation → quality gates → AI reviews → git commit + push → Jira update → story roll-up check.
+>
+> Batching multiple sub-tasks into a single quality gate or git push is FORBIDDEN. Every sub-task must have its own commit and its own passing quality gates.
+
 **Source of truth during execution:**
-- **Jira** → task tracking, status, acceptance criteria (WHAT to build). Once Jira tickets are created, Jira is the primary source of truth.
+- **Jira** → task tracking, status, acceptance criteria, implementation details (all embedded in ticket descriptions). Once Jira tickets are created, Jira is the primary source of truth. Each Sub-task is self-contained — usable by any engineer/agent on any machine.
 - **`design.md`** → architecture decisions, component structure, data models, design patterns (HOW to build it). Read-only reference — do NOT modify during execution.
-- Do NOT read `requirements.md` or `tasks.md` during Phase 2 — their content has been pushed to Jira.
+- Do NOT read `requirements.md` or `tasks.md` during Phase 2 — their content has been embedded into Jira ticket descriptions.
 
 ## Mandatory Execution Checklist (Pre-Flight)
 
@@ -532,11 +554,15 @@ git push origin feature/{feature-name}
 
 ### Step 8: Next Task
 
+> **LOOP BOUNDARY — This is where one task ends and the next begins.**
+> You MUST NOT start implementing the next sub-task until the current one has completed ALL steps above.
+> "Run all tasks" = repeat Steps 1–8 for each sub-task individually. NOT "implement everything then gate once."
+
 Verify this checklist before advancing to the next task:
-- [ ] Quality gates run and passing (Step 3)
-- [ ] Code-reviewer invoked and report produced (Step 4A)
-- [ ] Security-agent invoked and report produced (Step 4B)
-- [ ] Code committed and pushed to GitHub (Step 5)
+- [ ] Quality gates run and passing FOR THIS SUB-TASK (Step 3)
+- [ ] Code-reviewer invoked and report produced FOR THIS SUB-TASK (Step 4A)
+- [ ] Security-agent invoked and report produced FOR THIS SUB-TASK (Step 4B)
+- [ ] Code committed and pushed to GitHub FOR THIS SUB-TASK (Step 5)
 - [ ] Jira sub-task marked Done (Step 6)
 - [ ] Story roll-up checked (Step 7)
 
@@ -604,7 +630,7 @@ Estimated scope: Medium — involves auth logic, entity changes, and API endpoin
 ```
 📝 **Phase 1 Complete**:
 - ✅ Specs created: requirements.md, design.md, tasks.md
-- 📋 Jira: 5 Stories + 8 Sub-tasks created under Epic DMS-82
+- 📋 Jira: 2 Stories (Requirements) + 10 Sub-tasks (Tasks) created under Epic DMS-82
 - 🔄 Starting Phase 2 — executing tasks from Jira
 ```
 
@@ -624,8 +650,8 @@ Estimated scope: Medium — involves auth logic, entity changes, and API endpoin
 🔄 **Next**: DMS-102 — Implement auth service
 ```
 
-*When all tasks for a Story are done:*
+*When all sub-tasks for a Story (Requirement) are done:*
 ```
-✅ **Story Complete**: DMS-95 — User Login Feature → Done
-📊 **Epic Progress**: 1 of 5 Stories complete
+✅ **Story Complete**: DMS-95 — Submit Loan Application → Done
+📊 **Epic Progress**: 1 of 2 Stories complete
 ```
