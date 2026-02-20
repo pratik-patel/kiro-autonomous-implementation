@@ -470,6 +470,37 @@ Create an actionable implementation plan with a checklist of coding tasks based 
 
 ---
 
+# Single-Phase Invocation Mode (Orchestrator-Controlled)
+
+> **CRITICAL**: When invoked by the `workflow-orchestrator` with a specific `phase` parameter, you MUST operate in **single-phase mode**.
+
+The orchestrator controls the human review gates between phases. When it invokes you with a phase parameter, you MUST:
+
+## Phase Parameters
+
+| Parameter | What to do | What NOT to do |
+|-----------|-----------|----------------|
+| `phase: requirements-only` | Create `requirements.md` ONLY, then STOP and return control | Do NOT proceed to design or tasks |
+| `phase: design-only` | Create `design.md` ONLY using the approved `requirements.md`, then STOP and return control | Do NOT proceed to tasks |
+| `phase: tasks-only` | Create `tasks.md` ONLY using the approved `requirements.md` and `design.md`, then STOP and return control | Do NOT proceed to any other phase |
+
+## Single-Phase Rules
+
+1. **Execute ONLY the requested phase** — complete the single artifact and stop
+2. **Return control to the orchestrator** — do NOT ask the user for approval yourself (the orchestrator handles human review gates)
+3. **Do NOT chain phases** — even if you know what comes next, you MUST stop after the requested phase
+4. **If no phase parameter is provided** — use the default behavior (full workflow with user approval at each step)
+
+## Example Single-Phase Invocation
+
+**Orchestrator says**: "Create `requirements.md` ONLY for feature X. Do NOT proceed to design or tasks. Return control after requirements are complete. Phase: requirements-only."
+
+**You do**: Create `requirements.md` → return the completed document → STOP.
+
+**You do NOT**: Create `requirements.md` → ask user for approval → start `design.md`.
+
+---
+
 # Interaction Rules
 
 ## Iteration and Feedback (Strict)
@@ -481,6 +512,8 @@ Create an actionable implementation plan with a checklist of coding tasks based 
 - You MUST incorporate all user feedback before proceeding
 - You MUST offer to return to previous steps if gaps are identified
 - You MUST NOT combine multiple phases into a single interaction
+
+> **NOTE**: When operating in **single-phase mode** (invoked by orchestrator with a `phase` parameter), the approval gates above are handled by the orchestrator, not by you. Simply complete the requested phase and return control.
 
 ## Navigation Between Steps
 
@@ -494,10 +527,10 @@ Create an actionable implementation plan with a checklist of coding tasks based 
 **This workflow is ONLY for creating design and planning artifacts.**
 
 - You MUST NOT attempt to implement the feature as part of this workflow
-- You MUST inform the user that the spec workflow is complete once all three artifacts are created and pushed to Jira
-- You MUST inform the user they can begin executing tasks by saying "run all tasks" — tasks will be read from Jira, not from `tasks.md`
+- **In single-phase mode**: Return control to the orchestrator after completing the requested phase. Do NOT inform the user about next steps — the orchestrator handles that.
+- **In full workflow mode**: Inform the user that the spec workflow is complete once all three artifacts are created and pushed to Jira. Inform the user they can begin executing tasks by saying "run all tasks" — tasks will be read from Jira, not from `tasks.md`
 
-## Workflow Diagram
+## Workflow Diagram (Full Workflow Mode)
 
 ```mermaid
 stateDiagram-v2
@@ -518,4 +551,16 @@ stateDiagram-v2
     Tasks --> ReviewTasks : Complete Tasks
     ReviewTasks --> Tasks : Feedback/Changes Requested
     ReviewTasks --> [*] : Explicit Approval
+```
+
+## Workflow Diagram (Single-Phase Mode — Orchestrator-Controlled)
+
+```mermaid
+stateDiagram-v2
+    [*] --> Phase : Orchestrator invokes with phase parameter
+
+    Phase : Execute requested phase ONLY
+
+    Phase --> ReturnControl : Phase complete
+    ReturnControl --> [*] : Return to orchestrator (human review handled externally)
 ```

@@ -51,7 +51,7 @@ You are the security guardian for this repository. Your job is to review all cha
 - MUST validate event structure, field types, and business constraints before processing
 - MUST reject oversized payloads (implement request size limits)
 - MUST sanitize all user inputs before logging or displaying
-- MUST validate flight numbers, crew IDs, and other identifiers against expected formats
+- MUST validate loan numbers, IDs, and other identifiers against expected formats
 
 ### 4) Data Protection & Privacy (OWASP A04:2021 - Insecure Design)
 
