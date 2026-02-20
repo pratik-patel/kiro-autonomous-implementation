@@ -2,468 +2,553 @@
 
 ## Overview
 
-The LDC Loan Review Workflow implements a Step Functions-orchestrated, callback-driven state machine for processing loan reviews. Three API endpoints (`startPPAreview`, `assignToType`, `getNextStep`) drive the workflow forward. The MFE is the sole source of truth for loan decisions and attributes — the workflow trusts API payloads and persists them without independent DB lookups.
-
-The architecture uses the **Task Token callback pattern**: at each human-interaction point, the Step Function pauses and emits a Task Token. The API Handler stores this token in DynamoDB. When the MFE calls the next API, the handler retrieves the token and calls `SendTaskSuccess` to resume the execution.
+The LDC Loan Review Workflow is implemented as an AWS Step Functions state machine orchestrating Lambda-backed API handlers with DynamoDB persistence. The architecture follows a callback pattern: the MFE drives the workflow forward by invoking APIs that send task tokens back to Step Functions, resuming suspended executions. The system is designed as a Spring Boot application packaged as a Lambda function, following the project's layered architecture (Controller → Service → Repository).
 
 ## Architecture
 
-### Step Functions State Machine
+### High-Level Architecture
+
+```mermaid
+graph TB
+    MFE[Micro Frontend] -->|startPPAreview| APIGW[API Gateway]
+    MFE -->|assignToType| APIGW
+    MFE -->|getNextStep| APIGW
+    APIGW --> Lambda[Lambda Handler<br/>Spring Boot]
+    Lambda -->|Start Execution| SFN[Step Functions<br/>State Machine]
+    Lambda -->|SendTaskSuccess| SFN
+    SFN -->|Persist State| DDB[(DynamoDB<br/>Workflow State Store)]
+    SFN -->|Invoke| ExtLambda[External System<br/>Integrator Lambda]
+    ExtLambda -->|Update| VendPPA[Vend/PPA<br/>External Systems]
+    SFN -->|Log| CW[CloudWatch]
+```
+
+### Step Functions State Machine Flow
 
 ```mermaid
 stateDiagram-v2
     [*] --> Initialize: startPPAreview API
-    Initialize --> WaitForReviewType: Persist state, emit Task Token
-    WaitForReviewType --> AssignReviewType: assignToType API (callback)
-    AssignReviewType --> WaitForDecision: Persist review type, emit Task Token
+    Initialize --> PersistInitialState
+    PersistInitialState --> WaitForAssignToType
+
+    WaitForAssignToType --> AssignReviewType: assignToType API (callback)
+    AssignReviewType --> PersistReviewType
+    PersistReviewType --> WaitForDecision
+
     WaitForDecision --> ProcessDecision: getNextStep API (callback)
-    ProcessDecision --> CheckPending: Evaluate attributes
+    ProcessDecision --> PersistDecision
+    PersistDecision --> CheckPendingAttributes
 
-    CheckPending --> WaitForDecision: Has Pending → suspend (emit Task Token)
-    CheckPending --> DetermineStatus: No Pending → proceed
+    CheckPendingAttributes --> WaitForDecision: Has Pending Attributes
+    CheckPendingAttributes --> DetermineStatus: All Complete
 
-    DetermineStatus --> RouteStatus: Set Workflow_Status
-
-    RouteStatus --> UpdateExternalSystems: Approved / Rejected / Partially Approved / Repurchase
-    RouteStatus --> WaitForReclassConfirmation: Reclass Approved
+    DetermineStatus --> RouteByStatus
+    RouteByStatus --> WaitForReclassConfirmation: Reclass Approved
+    RouteByStatus --> UpdateExternalSystems: Other Statuses
 
     WaitForReclassConfirmation --> ConfirmReclass: getNextStep API (callback)
-    ConfirmReclass --> UpdateExternalSystems: Confirmed
+    ConfirmReclass --> UpdateExternalSystems
 
-    UpdateExternalSystems --> Completion: Success
-    UpdateExternalSystems --> Failed: Integration failure
+    UpdateExternalSystems --> LogAuditTrail
+    LogAuditTrail --> Success
+    Success --> [*]
 
-    Completion --> [*]: Log audit, set Completed
-    Failed --> [*]: Log error, set Failed
+    ProcessDecision --> ErrorState: Unexpected Error
+    UpdateExternalSystems --> ErrorState: Integration Failure
+    ErrorState --> [*]
 ```
 
 ### Component Architecture
 
 ```mermaid
-graph TB
-    subgraph "API Layer"
-        A[API Gateway / ALB]
-        B[StartPPAReviewHandler<br/>Lambda]
-        C[AssignToTypeHandler<br/>Lambda]
-        D[GetNextStepHandler<br/>Lambda]
+graph LR
+    subgraph "Lambda Handler (Spring Boot)"
+        Controller[WorkflowController]
+        Service[WorkflowService]
+        Repo[WorkflowRepository]
+        Validator[InputValidator]
+        SFNClient[StepFunctionsClient]
     end
 
-    subgraph "Orchestration"
-        E[Step Functions<br/>State Machine]
+    subgraph "AWS Services"
+        SFN[Step Functions]
+        DDB[(DynamoDB)]
     end
 
-    subgraph "Business Logic Lambdas"
-        F[InitializationLambda]
-        G[ReviewTypeAssignmentLambda]
-        H[DecisionProcessingLambda]
-        I[StatusDeterminationLambda]
-        J[ExternalSystemsLambda]
-        K[CompletionLambda]
-    end
-
-    subgraph "Persistence"
-        L[(DynamoDB<br/>WorkflowState Table)]
-    end
-
-    subgraph "External"
-        M[Vend System<br/>Mock/Placeholder]
-        N[PPA System<br/>Mock/Placeholder]
-    end
-
-    subgraph "Observability"
-        O[CloudWatch Logs]
-        P[CloudWatch Metrics]
-    end
-
-    A --> B
-    A --> C
-    A --> D
-
-    B --> E
-    C -->|SendTaskSuccess| E
-    D -->|SendTaskSuccess| E
-
-    E --> F
-    E --> G
-    E --> H
-    E --> I
-    E --> J
-    E --> K
-
-    F --> L
-    G --> L
-    H --> L
-    I --> L
-    J --> M
-    J --> N
-    K --> L
-    K --> O
+    Controller --> Validator
+    Controller --> Service
+    Service --> Repo
+    Service --> SFNClient
+    Repo --> DDB
+    SFNClient --> SFN
 ```
 
-### Callback Pattern Flow
+## Components
 
-```mermaid
-sequenceDiagram
-    participant MFE
-    participant APIHandler as API Handler Lambda
-    participant SFN as Step Functions
-    participant BizLambda as Business Logic Lambda
-    participant DDB as DynamoDB
+### 1. API Layer (Controller)
 
-    MFE->>APIHandler: startPPAreview(payload)
-    APIHandler->>APIHandler: Validate payload
-    APIHandler->>SFN: StartExecution(input)
-    SFN->>BizLambda: Initialize (with TaskToken)
-    BizLambda->>DDB: Persist state + TaskToken
-    BizLambda-->>SFN: (paused, waiting for callback)
-    APIHandler-->>MFE: 200 OK {status: Initialized}
+**`WorkflowController`** — REST controller exposing three endpoints:
 
-    MFE->>APIHandler: assignToType(payload)
-    APIHandler->>DDB: Retrieve TaskToken
-    APIHandler->>SFN: SendTaskSuccess(token, output)
-    SFN->>BizLambda: AssignReviewType
-    BizLambda->>DDB: Update review type + new TaskToken
-    BizLambda-->>SFN: (paused, waiting for callback)
-    APIHandler-->>MFE: 200 OK {status: Review Type Assigned}
+| Endpoint | Method | Path | Purpose |
+|----------|--------|------|---------|
+| startPPAreview | POST | `/api/v1/workflow/start` | Initiates workflow |
+| assignToType | POST | `/api/v1/workflow/assign-type` | Updates review type |
+| getNextStep | POST | `/api/v1/workflow/next-step` | Submits decisions / confirms reclass |
 
-    MFE->>APIHandler: getNextStep(payload)
-    APIHandler->>DDB: Retrieve TaskToken
-    APIHandler->>SFN: SendTaskSuccess(token, output)
-    SFN->>BizLambda: ProcessDecision
-    BizLambda->>DDB: Persist decision + attributes
-    alt Has Pending Attributes
-        BizLambda->>DDB: Store new TaskToken
-        BizLambda-->>SFN: (paused, waiting for callback)
-    else All Complete
-        SFN->>BizLambda: DetermineStatus
-        BizLambda->>DDB: Update status
-    end
-    APIHandler-->>MFE: 200 OK {status: current}
-```
+Each endpoint:
+- Generates a correlation ID via `CorrelationIdGenerator`
+- Delegates validation to `InputValidator`
+- Delegates business logic to `WorkflowService`
+- Returns standardized responses via `ApiResponse` wrapper
+
+### 2. Validation Layer
+
+**`InputValidator`** — Validates all API inputs at the trust boundary:
+
+- Validates mandatory field presence
+- Validates Request_Type against allowed enum values (`LDC`, `SEC_POLICY`, `CONDUIT`)
+- Validates identifier formats (Request_Number, Loan_Number, Task_Number) against regex patterns
+- Validates payload size does not exceed configured maximum
+- Throws `ValidationException` with descriptive messages on failure
+
+### 3. Service Layer
+
+**`WorkflowService`** — Core business logic:
+
+- **`startWorkflow(StartWorkflowRequest)`**: Generates Task_Number, starts Step Functions execution, returns Task_Number
+- **`assignReviewType(AssignTypeRequest)`**: Sends task success with updated review type to Step Functions
+- **`submitDecision(NextStepRequest)`**: Sends task success with decision data to Step Functions
+- Uses `StepFunctionsClient` wrapper for AWS SDK calls
+- Uses `WorkflowRepository` for direct DynamoDB reads (e.g., validating Task_Number exists)
+
+**`StatusDeterminationService`** — Pure business logic for status determination (invoked within Step Functions Lambda):
+
+- **`determineStatus(List<LoanAttribute>)`**: Applies status determination rules:
+  - All Approved → `APPROVED`
+  - All Rejected → `REJECTED`
+  - Mix of Approved/Rejected → `PARTIALLY_APPROVED`
+  - Any Repurchase → `REPURCHASE`
+  - Any Reclass → `RECLASS_APPROVED`
+- Priority order: `REPURCHASE` > `RECLASS_APPROVED` > `PARTIALLY_APPROVED` > `APPROVED` / `REJECTED`
+
+**`ExternalSystemService`** — Handles downstream integration:
+
+- **`updateExternalSystems(WorkflowState)`**: Invokes Vend/PPA integration (mock/placeholder)
+- Uses Resilience4j circuit breaker for external calls
+- Logs success/failure with correlation ID
+
+### 4. Repository Layer
+
+**`WorkflowRepository`** — DynamoDB data access:
+
+- **`save(WorkflowState)`**: Persists workflow state
+- **`findByRequestAndTask(String requestNumber, String taskNumber)`**: Retrieves workflow state
+- **`updateStatus(String requestNumber, String taskNumber, String status)`**: Updates status field
+- **`updateDecision(String requestNumber, String taskNumber, LoanDecision decision, List<LoanAttribute> attributes)`**: Updates decision and attributes
+
+### 5. Step Functions Integration
+
+**`StepFunctionsClientWrapper`** — Wraps AWS SDK Step Functions client:
+
+- **`startExecution(String stateMachineArn, String input)`**: Starts new execution
+- **`sendTaskSuccess(String taskToken, String output)`**: Resumes paused execution
+- **`sendTaskFailure(String taskToken, String error, String cause)`**: Fails a paused execution
+
+### 6. Step Functions State Machine Lambda Tasks
+
+The state machine invokes Lambda functions for specific tasks within the workflow:
+
+**`WorkflowTaskHandler`** — Lambda handler invoked by Step Functions for internal tasks:
+
+- **Initialize**: Persists initial state to DynamoDB
+- **PersistReviewType**: Updates review type in DynamoDB
+- **ProcessDecision**: Persists decision, checks for pending attributes
+- **DetermineStatus**: Calls `StatusDeterminationService`
+- **UpdateExternalSystems**: Calls `ExternalSystemService`
+- **LogAuditTrail**: Writes final audit record
 
 ## Data Models
 
+### Request DTOs
+
+```java
+@Value
+@Builder
+public class StartWorkflowRequest {
+    String requestNumber;    // Mandatory
+    String loanNumber;       // Mandatory
+    String requestType;      // Mandatory: LDC | Sec Policy | Conduit
+    List<LoanAttributeDto> attributes; // Optional
+}
+
+@Value
+@Builder
+public class AssignTypeRequest {
+    String taskNumber;       // Mandatory
+    String requestNumber;    // Mandatory
+    String loanNumber;       // Mandatory
+    String reviewType;       // Mandatory: LDC | Sec Policy | Conduit
+}
+
+@Value
+@Builder
+public class NextStepRequest {
+    String taskNumber;       // Mandatory
+    String requestNumber;    // Mandatory
+    String loanNumber;       // Mandatory
+    String loanDecision;     // Mandatory
+    List<LoanAttributeDto> attributes; // Mandatory
+}
+
+@Value
+@Builder
+public class LoanAttributeDto {
+    String attributeName;
+    String attributeStatus;  // Pending Review | Approved | Rejected | Repurchase | Reclass
+}
+```
+
+### Response DTOs
+
+```java
+@Value
+@Builder
+public class ApiResponse<T> {
+    boolean success;
+    String message;
+    String correlationId;
+    T data;
+    String errorCode;        // null on success
+}
+
+@Value
+@Builder
+public class StartWorkflowResponse {
+    String taskNumber;
+    String executionArn;
+}
+```
+
+### Domain Models
+
+```java
+@Getter
+@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class WorkflowState {
+    String requestNumber;    // Partition Key
+    String taskNumber;       // Sort Key
+    String loanNumber;
+    String reviewType;       // LDC | SEC_POLICY | CONDUIT
+    String workflowStatus;   // INITIALIZED | REVIEW_TYPE_ASSIGNED | PENDING_DECISION | DETERMINED | WAITING_CONFIRMATION | UPDATING_EXTERNAL | COMPLETED | FAILED
+    String loanDecision;     // APPROVED | REJECTED | PARTIALLY_APPROVED | REPURCHASE | RECLASS_APPROVED
+    List<LoanAttribute> attributes;
+    String correlationId;
+    String executionArn;
+    String currentTaskToken;
+    Instant createdAt;
+    Instant updatedAt;
+    Long ttl;                // DynamoDB TTL for data retention
+}
+
+@Value
+@Builder
+public class LoanAttribute {
+    String attributeName;
+    String attributeStatus;  // PENDING_REVIEW | APPROVED | REJECTED | REPURCHASE | RECLASS
+}
+```
+
+### Enums
+
+```java
+public enum ReviewType {
+    LDC, SEC_POLICY, CONDUIT;
+
+    public static ReviewType fromString(String value) {
+        // Maps "Sec Policy" → SEC_POLICY, "Conduit" → CONDUIT, "LDC" → LDC
+    }
+}
+
+public enum WorkflowStatus {
+    INITIALIZED, REVIEW_TYPE_ASSIGNED, PENDING_DECISION,
+    DETERMINED, WAITING_CONFIRMATION, UPDATING_EXTERNAL,
+    COMPLETED, FAILED
+}
+
+public enum LoanDecisionStatus {
+    APPROVED, REJECTED, PARTIALLY_APPROVED, REPURCHASE, RECLASS_APPROVED
+}
+
+public enum AttributeStatus {
+    PENDING_REVIEW, APPROVED, REJECTED, REPURCHASE, RECLASS
+}
+```
+
 ### DynamoDB Table Design
 
-**Table Name:** `LoanReviewWorkflowState`
+**Table: `ldc-workflow-state`**
 
 | Attribute | Type | Key | Description |
-|---|---|---|---|
-| `requestNumber` | String | Partition Key (PK) | Unique request identifier |
-| `loanNumber` | String | Sort Key (SK) | Unique loan identifier |
-| `taskNumber` | String | — | Step Functions execution task identifier |
-| `executionArn` | String | — | Step Functions execution ARN |
-| `taskToken` | String | — | Current callback task token |
-| `requestType` | String | — | LDC, Sec Policy, or Conduit |
-| `reviewType` | String | — | Assigned review classification |
-| `workflowStatus` | String | — | Current workflow status |
-| `loanDecision` | String | — | Latest loan decision |
-| `loanAttributes` | List&lt;Map&gt; | — | Nested attribute list with statuses |
-| `auditTrail` | List&lt;Map&gt; | — | List of status transition records |
-| `reclassConfirmation` | Map | — | Confirmation details (timestamp, action) |
-| `correlationId` | String | — | Unique ID for request tracing |
-| `createdTimestamp` | String (ISO-8601) | — | Creation time in UTC |
-| `lastModifiedTimestamp` | String (ISO-8601) | — | Last update time in UTC |
-| `completedTimestamp` | String (ISO-8601) | — | Completion time in UTC |
+|-----------|------|-----|-------------|
+| requestNumber | String | Partition Key (PK) | Unique request identifier |
+| taskNumber | String | Sort Key (SK) | Unique task identifier |
+| loanNumber | String | — | Loan identifier |
+| reviewType | String | — | LDC / SEC_POLICY / CONDUIT |
+| workflowStatus | String | — | Current workflow state |
+| loanDecision | String | — | Determined loan decision |
+| attributes | List<Map> | — | Loan attributes with statuses |
+| correlationId | String | — | Traceability ID |
+| executionArn | String | — | Step Functions execution ARN |
+| currentTaskToken | String | — | Active callback token |
+| createdAt | String (ISO-8601) | — | Creation timestamp (UTC) |
+| updatedAt | String (ISO-8601) | — | Last update timestamp (UTC) |
+| ttl | Number | — | DynamoDB TTL epoch seconds |
 
-**GSI-1:** `taskNumber-index`
-- Partition Key: `taskNumber`
-- Projection: ALL
-- Purpose: Look up workflow state by Task_Number for callback APIs
+**GSI: `loanNumber-index`**
+- Partition Key: `loanNumber`
+- Sort Key: `createdAt`
+- Purpose: Query workflows by loan number
 
-**Loan Attribute Structure (nested):**
-```json
-{
-  "attributeName": "string",
-  "attributeStatus": "Pending Review | Approved | Rejected | Repurchase | Reclass",
-  "updatedTimestamp": "ISO-8601 UTC"
-}
-```
-
-**Audit Trail Entry Structure (nested):**
-```json
-{
-  "previousStatus": "string",
-  "newStatus": "string",
-  "timestamp": "ISO-8601 UTC",
-  "triggeringAction": "string",
-  "correlationId": "string"
-}
-```
-
-### Domain Models (Java)
-
-```java
-// Enums
-public enum RequestType { LDC, SEC_POLICY, CONDUIT }
-public enum AttributeStatus { PENDING_REVIEW, APPROVED, REJECTED, REPURCHASE, RECLASS }
-public enum WorkflowStatus {
-    INITIALIZED, REVIEW_TYPE_ASSIGNED, DECISION_PENDING,
-    APPROVED, REJECTED, PARTIALLY_APPROVED, REPURCHASE,
-    RECLASS_APPROVED, WAITING_FOR_CONFIRMATION,
-    UPDATING_EXTERNAL_SYSTEMS, COMPLETED, FAILED
-}
-
-// Domain Entity
-@Data @Builder
-public class WorkflowState {
-    private String requestNumber;
-    private String loanNumber;
-    private String taskNumber;
-    private String executionArn;
-    private String taskToken;
-    private RequestType requestType;
-    private String reviewType;
-    private WorkflowStatus workflowStatus;
-    private String loanDecision;
-    private List<LoanAttribute> loanAttributes;
-    private List<AuditTrailEntry> auditTrail;
-    private ReclassConfirmation reclassConfirmation;
-    private String correlationId;
-    private Instant createdTimestamp;
-    private Instant lastModifiedTimestamp;
-    private Instant completedTimestamp;
-}
-
-@Data @Builder
-public class LoanAttribute {
-    private String attributeName;
-    private AttributeStatus attributeStatus;
-    private Instant updatedTimestamp;
-}
-
-@Data @Builder
-public class AuditTrailEntry {
-    private WorkflowStatus previousStatus;
-    private WorkflowStatus newStatus;
-    private Instant timestamp;
-    private String triggeringAction;
-    private String correlationId;
-}
-
-@Data @Builder
-public class ReclassConfirmation {
-    private Instant confirmationTimestamp;
-    private String confirmingAction;
-}
-```
-
-### API Request/Response DTOs
-
-```java
-// --- startPPAreview ---
-@Data @Builder
-public class StartPPAReviewRequest {
-    @NotBlank private String requestNumber;
-    @NotBlank private String loanNumber;
-    @NotNull private RequestType requestType;
-    private List<LoanAttributeDto> attributes; // optional
-}
-
-// --- assignToType ---
-@Data @Builder
-public class AssignToTypeRequest {
-    @NotBlank private String taskNumber;
-    @NotBlank private String requestNumber;
-    @NotBlank private String loanNumber;
-    @NotBlank private String reviewType;
-}
-
-// --- getNextStep ---
-@Data @Builder
-public class GetNextStepRequest {
-    @NotBlank private String taskNumber;
-    @NotBlank private String requestNumber;
-    @NotBlank private String loanNumber;
-    @NotBlank private String loanDecision;
-    @NotNull private List<LoanAttributeDto> attributes;
-}
-
-@Data @Builder
-public class LoanAttributeDto {
-    private String attributeName;
-    private AttributeStatus attributeStatus;
-}
-
-// --- Common Response ---
-@Data @Builder
-public class WorkflowResponse {
-    private String requestNumber;
-    private String loanNumber;
-    private String status;
-    private String message;
-    private String correlationId;
-    private String taskNumber;
-}
-```
-
+**Capacity**: On-demand (pay-per-request) for unpredictable workloads.
+**Encryption**: AWS-managed KMS key (SSE).
+**PITR**: Enabled for production.
 
 ## Correctness Properties
 
-*A property is a characteristic or behavior that should hold true across all valid executions of a system — essentially, a formal statement about what the system should do. Properties serve as the bridge between human-readable specifications and machine-verifiable correctness guarantees.*
+> *A property is a characteristic or behavior that should hold true across all valid executions of a system — essentially, a formal statement about what the system should do. Properties serve as the bridge between human-readable specifications and machine-verifiable correctness guarantees.*
 
-### Prework Summary
+### Prework Analysis
 
-After analyzing all 44 acceptance criteria, the following were identified as testable properties (universal rules over input spaces). Criteria testable only as examples (specific scenarios) are covered by unit tests in the Testing Strategy. Redundant properties were consolidated:
+```
+Acceptance Criteria Testing Prework:
 
-- **1.2 + 1.3 consolidated**: Validation of startPPAreview mandatory fields (missing field → 400) is one property.
-- **2.3 + 2.4 consolidated**: Validation of assignToType mandatory fields is one property.
-- **3.2 + 3.3 consolidated**: Validation of getNextStep mandatory fields is one property.
-- **4.1–4.5 consolidated**: Status determination from attribute statuses is one comprehensive property.
-- **5.1 + 5.2 consolidated**: Status routing is one property (direct vs. reclass path).
-- **11.1 + 11.4 consolidated**: API response structure (required fields + correlation ID) is one property.
+1.1 WHEN startPPAreview API invoked with valid payload, start execution and return Task_Number
+  Thoughts: We can generate random valid payloads and verify an execution starts and a Task_Number is returned. This is integration-level, better as example test.
+  Testable: yes - example
 
-### Property 1: startPPAreview Payload Validation
+1.2 Validate mandatory fields: Request_Number, Loan_Number, Request_Type
+  Thoughts: For all subsets of mandatory fields where at least one is missing, validation should fail. This is a property over all combinations of missing fields.
+  Testable: yes - property
 
-*For all* payloads submitted to the `startPPAreview` API where at least one of Request_Number, Loan_Number, or Request_Type is missing or null, the API_Handler shall return a 400 Bad Request response, and the error message shall identify every missing field.
+1.3 WHEN mandatory field missing, reject with HTTP 400
+  Thoughts: Edge case of 1.2 — the HTTP status is the assertion.
+  Testable: edge-case
 
-**Validates: Requirements 1.2, 1.3**
+1.4 Validate Request_Type is one of allowed values
+  Thoughts: For all strings that are NOT in the allowed set, validation should reject. For all strings IN the allowed set, validation should accept. This is a property.
+  Testable: yes - property
 
-### Property 2: Request Type Validation
+1.5 WHEN Request_Type invalid, reject with HTTP 400
+  Thoughts: Edge case of 1.4.
+  Testable: edge-case
 
-*For all* string values provided as Request_Type that are not exactly one of `LDC`, `Sec Policy`, or `Conduit`, the API_Handler shall return a 400 Bad Request response indicating the invalid Request_Type value.
+1.6 Persist initial state to Workflow_State_Store
+  Thoughts: Integration test — verify DynamoDB write. Better as example.
+  Testable: yes - example
 
-**Validates: Requirements 1.4**
+1.7 Assign Review_Type from payload
+  Thoughts: Subsumed by 1.6 persistence test.
+  Testable: edge-case
 
-### Property 3: assignToType Payload Validation
+1.8 Optional Attributes persisted alongside initial state
+  Thoughts: Edge case of 1.6.
+  Testable: edge-case
 
-*For all* payloads submitted to the `assignToType` API where at least one of Task_Number, Request_Number, Loan_Number, or Review_Type is missing or null, the API_Handler shall return a 400 Bad Request response identifying every missing field.
+2.1 assignToType resumes execution with updated Review_Type
+  Thoughts: Integration test.
+  Testable: yes - example
 
-**Validates: Requirements 2.3, 2.4**
+2.2 Validate mandatory fields for assignToType
+  Thoughts: Same property pattern as 1.2 but for different fields. Can combine into one property.
+  Testable: yes - property (combined with 1.2)
 
-### Property 4: getNextStep Payload Validation
+2.3-2.5 assignToType validation and persistence
+  Thoughts: Edge cases of 2.2 and integration tests.
+  Testable: edge-case
 
-*For all* payloads submitted to the `getNextStep` API where at least one of Task_Number, Request_Number, Loan_Number, Loan_Decision, or Attributes is missing or null, the API_Handler shall return a 400 Bad Request response identifying every missing field.
+3.1-3.3 getNextStep validation
+  Thoughts: Same mandatory field validation property pattern.
+  Testable: yes - property (combined with 1.2)
 
-**Validates: Requirements 3.2, 3.3**
+3.4 Persist submitted decision and attributes
+  Thoughts: Integration test.
+  Testable: yes - example
 
-### Property 5: Pending Attribute Detection
+3.5 WHEN any attribute is Pending Review, loop back
+  Thoughts: For any list of attributes where at least one is PENDING_REVIEW, the system should suspend. This is a property.
+  Testable: yes - property
 
-*For all* non-empty lists of Loan_Attributes, the Workflow_Engine correctly identifies whether any attribute has an Attribute_Status of `Pending Review`. If at least one attribute is pending, the result is "has pending"; if none are pending, the result is "all complete".
+3.6 WHEN all attributes are non-pending, proceed to status determination
+  Thoughts: Inverse of 3.5. For any list where none are PENDING_REVIEW, proceed. Combined with 3.5 into one property.
+  Testable: yes - property (combined with 3.5)
 
-**Validates: Requirements 3.4**
+4.1 All Approved → APPROVED
+  Thoughts: For any non-empty list of attributes all with APPROVED status, determination should be APPROVED. Property.
+  Testable: yes - property
 
-### Property 6: Status Determination from Attributes
+4.2 All Rejected → REJECTED
+  Thoughts: For any non-empty list all REJECTED, determination should be REJECTED. Property.
+  Testable: yes - property
 
-*For all* non-empty lists of Loan_Attributes where no attribute has `Pending Review` status, the Workflow_Engine shall determine the Workflow_Status according to these rules (evaluated in priority order):
-1. If any attribute is `Reclass` → `Reclass Approved`
-2. If any attribute is `Repurchase` → `Repurchase`
-3. If all attributes are `Approved` → `Approved`
-4. If all attributes are `Rejected` → `Rejected`
-5. If attributes are a mix of `Approved` and `Rejected` → `Partially Approved`
+4.3 Mix of Approved and Rejected → PARTIALLY_APPROVED
+  Thoughts: For any list with at least one APPROVED and at least one REJECTED (and no Repurchase/Reclass), determination should be PARTIALLY_APPROVED. Property.
+  Testable: yes - property
 
-**Validates: Requirements 4.1, 4.2, 4.3, 4.4, 4.5**
+4.4 Any Repurchase → REPURCHASE
+  Thoughts: For any list containing at least one REPURCHASE, determination should be REPURCHASE. Property.
+  Testable: yes - property
 
-### Property 7: Status Routing Correctness
+4.5 Any Reclass → RECLASS_APPROVED
+  Thoughts: For any list containing at least one RECLASS (and no REPURCHASE), determination should be RECLASS_APPROVED. Property.
+  Testable: yes - property
 
-*For all* determined Workflow_Statuses, the Workflow_Engine shall route:
-- `Approved`, `Rejected`, `Partially Approved`, `Repurchase` → Update External Systems step
-- `Reclass Approved` → Reclass Confirmation step (with status set to `Waiting for Confirmation`)
+4.6 Persist determined status
+  Thoughts: Integration test.
+  Testable: yes - example
 
-No other Workflow_Status values shall reach the routing step.
+5.1 Non-reclass statuses route to external update
+  Thoughts: For all statuses in {APPROVED, REJECTED, PARTIALLY_APPROVED, REPURCHASE}, routing should go to external update. Property.
+  Testable: yes - property
 
+5.2 Reclass routes to waiting for confirmation
+  Thoughts: Specific case, example test.
+  Testable: yes - example
+
+5.3-5.4 Reclass confirmation flow
+  Thoughts: Integration test.
+  Testable: yes - example
+
+6.1-6.3 External system update
+  Thoughts: Integration tests with mocked external service.
+  Testable: yes - example
+
+7.1-7.3 Audit trail and completion
+  Thoughts: Integration tests.
+  Testable: yes - example
+
+8.1-8.4 State persistence
+  Thoughts: Architectural invariant — every transition persists state. Property.
+  Testable: yes - property
+
+9.1 Validate identifier formats
+  Thoughts: For all strings not matching expected patterns, validation should reject. Property.
+  Testable: yes - property
+
+9.2 Reject oversized payloads
+  Thoughts: Edge case.
+  Testable: edge-case
+
+9.3-9.5 Error handling
+  Thoughts: Example tests.
+  Testable: yes - example
+```
+
+### Property Reflection (Redundancy Elimination)
+
+- Properties 1.2, 2.2, 3.1-3.3 (mandatory field validation) → Combined into **Property 1**: "Mandatory field validation rejects incomplete payloads"
+- Properties 3.5 and 3.6 (pending check) → Combined into **Property 3**: "Pending attribute detection"
+- Properties 4.1-4.5 (status determination) → These are distinct business rules with different logic paths. Keep as **Properties 4-8** but combine 4.1 and 4.2 into a single "homogeneous status" property since the logic is symmetric.
+- Property 5.1 (routing) → Keep as **Property 9**
+- Property 8.1-8.4 (state persistence invariant) → Keep as **Property 10** but this is better verified via integration tests. Remove as formal property.
+- Property 9.1 (identifier format) → Keep as **Property 2**
+
+### Final Correctness Properties
+
+**Property 1: Mandatory field validation rejects incomplete payloads**
+*For all* API request payloads (startPPAreview, assignToType, getNextStep) where at least one mandatory field is null or blank, the InputValidator shall return a validation error identifying the missing field(s). *For all* payloads where all mandatory fields are present and valid, the InputValidator shall accept the payload.
+**Validates: Requirements 1.2, 1.3, 2.2, 2.3, 3.2, 3.3**
+
+**Property 2: Identifier format validation**
+*For all* strings that do not match the expected identifier pattern for Request_Number, Loan_Number, or Task_Number, the InputValidator shall reject the input. *For all* strings that match the expected pattern, the InputValidator shall accept the input.
+**Validates: Requirements 9.1**
+
+**Property 3: Request type validation accepts only allowed values**
+*For all* strings in the set {"LDC", "Sec Policy", "Conduit"}, the ReviewType parser shall return a valid ReviewType enum. *For all* strings not in that set, the parser shall throw a validation error.
+**Validates: Requirements 1.4, 1.5**
+
+**Property 4: Pending attribute detection controls workflow progression**
+*For any* non-empty list of LoanAttributes, if at least one attribute has status PENDING_REVIEW, the completion check shall return `false` (loop back). If no attribute has status PENDING_REVIEW, the completion check shall return `true` (proceed).
+**Validates: Requirements 3.5, 3.6**
+
+**Property 5: Homogeneous approved attributes yield APPROVED status**
+*For any* non-empty list of LoanAttributes where every attribute has status APPROVED, the StatusDeterminationService shall return APPROVED.
+**Validates: Requirements 4.1**
+
+**Property 6: Homogeneous rejected attributes yield REJECTED status**
+*For any* non-empty list of LoanAttributes where every attribute has status REJECTED, the StatusDeterminationService shall return REJECTED.
+**Validates: Requirements 4.2**
+
+**Property 7: Mixed approved/rejected attributes yield PARTIALLY_APPROVED**
+*For any* list of LoanAttributes containing at least one APPROVED and at least one REJECTED (with no REPURCHASE or RECLASS), the StatusDeterminationService shall return PARTIALLY_APPROVED.
+**Validates: Requirements 4.3**
+
+**Property 8: Repurchase takes priority**
+*For any* list of LoanAttributes containing at least one REPURCHASE, regardless of other statuses, the StatusDeterminationService shall return REPURCHASE.
+**Validates: Requirements 4.4**
+
+**Property 9: Reclass takes priority over partial/approved/rejected**
+*For any* list of LoanAttributes containing at least one RECLASS and no REPURCHASE, the StatusDeterminationService shall return RECLASS_APPROVED.
+**Validates: Requirements 4.5**
+
+**Property 10: Non-reclass statuses route to external update**
+*For all* LoanDecisionStatus values in {APPROVED, REJECTED, PARTIALLY_APPROVED, REPURCHASE}, the routing logic shall direct to the External System Update step. Only RECLASS_APPROVED shall route to the confirmation step.
 **Validates: Requirements 5.1, 5.2**
-
-### Property 8: Audit Trail Completeness
-
-*For all* sequences of Workflow_Status transitions performed on a workflow, the Workflow_Repository shall contain an Audit_Trail entry for each transition. The number of Audit_Trail entries shall equal the number of status transitions, and each entry shall contain non-null previousStatus, newStatus, timestamp, and triggeringAction fields.
-
-**Validates: Requirements 8.2**
-
-### Property 9: Last Modified Timestamp Invariant
-
-*For all* update operations on the Workflow_Repository, the `lastModifiedTimestamp` field shall be updated to a value that is greater than or equal to the previous `lastModifiedTimestamp` value.
-
-**Validates: Requirements 10.3**
-
-### Property 10: API Response Structure Compliance
-
-*For all* API responses returned by the API_Handler (success or error), the JSON response body shall contain non-null values for `requestNumber`, `loanNumber`, `status`, and `message` fields, and shall include a non-empty `correlationId` field.
-
-**Validates: Requirements 11.1, 11.4**
-
-### Property 11: Error Response Opacity
-
-*For all* API error responses with HTTP status 500, the response message shall not contain stack traces, class names, internal exception messages, or DynamoDB table names.
-
-**Validates: Requirements 11.3**
-
-### Property 12: Invalid Task Number Rejection
-
-*For all* API requests (`assignToType`, `getNextStep`) where the Task_Number does not correspond to any active workflow execution in the Workflow_Repository, the API_Handler shall return a 404 Not Found response.
-
-**Validates: Requirements 9.4**
 
 ## Error Handling
 
-### Failure Modes and Recovery
+### Error Categories
 
-| Failure Mode | Detection | Recovery | Status |
-|---|---|---|---|
-| Invalid API payload | Request validation | Return 400 with field-level errors | No state change |
-| Task_Number not found | DynamoDB lookup miss | Return 404 | No state change |
-| DynamoDB write failure | SDK exception | Throw `WorkflowPersistenceException` with context | Caller handles retry |
-| Step Functions callback failure | SDK exception | Log error, return 500 with correlation ID | Execution remains paused |
-| External system integration failure | Lambda invocation error | Retry 2x with exponential backoff, then set `Failed` | `Failed` |
-| Unexpected Lambda error | Catch-all handler | Log full error to CloudWatch, return 500 with correlation ID | Depends on step |
+| Category | HTTP Status | Error Code | Recovery |
+|----------|-------------|------------|----------|
+| Missing mandatory field | 400 | `VALIDATION_MISSING_FIELD` | Client fixes payload |
+| Invalid field format | 400 | `VALIDATION_INVALID_FORMAT` | Client fixes payload |
+| Invalid Request_Type | 400 | `VALIDATION_INVALID_REQUEST_TYPE` | Client fixes payload |
+| Payload too large | 413 | `PAYLOAD_TOO_LARGE` | Client reduces payload |
+| Workflow not found | 404 | `WORKFLOW_NOT_FOUND` | Client verifies Task_Number |
+| External system failure | 502 | `EXTERNAL_SYSTEM_ERROR` | Retry with circuit breaker |
+| Unexpected error | 500 | `INTERNAL_ERROR` | Logged with correlation ID |
 
 ### Exception Hierarchy
 
-```java
-public class WorkflowException extends RuntimeException { /* base */ }
-public class WorkflowValidationException extends WorkflowException { /* 400 errors */ }
-public class WorkflowNotFoundException extends WorkflowException { /* 404 errors */ }
-public class WorkflowPersistenceException extends WorkflowException { /* DynamoDB errors */ }
-public class ExternalSystemException extends WorkflowException { /* integration errors */ }
+```
+RuntimeException
+├── WorkflowValidationException (400 errors)
+│   ├── MissingFieldException
+│   ├── InvalidFormatException
+│   └── InvalidRequestTypeException
+├── WorkflowNotFoundException (404)
+├── ExternalSystemException (502)
+└── WorkflowExecutionException (500)
 ```
 
-### Retry Strategy
+### Circuit Breaker Configuration (Resilience4j)
 
-- **Lambda retries**: Configured in Step Functions ASL with `Retry` blocks — 2 retries, exponential backoff (2s, 4s).
-- **DynamoDB retries**: AWS SDK built-in retry with default configuration.
-- **External system retries**: Handled by Step Functions `Retry` on the integration Lambda task.
+- **Failure rate threshold**: 50%
+- **Wait duration in open state**: 30 seconds
+- **Sliding window size**: 10 calls
+- **Applied to**: `ExternalSystemService.updateExternalSystems()`
 
 ## Testing Strategy
 
-### Dual Testing Approach
+### Unit Tests
+- `InputValidatorTest` — Validates all field presence, format, and type rules
+- `StatusDeterminationServiceTest` — Tests all status determination logic paths
+- `WorkflowServiceTest` — Tests service orchestration with mocked dependencies
+- `WorkflowControllerTest` — Tests endpoint routing, validation delegation, response formatting
 
-| Test Type | Framework | Purpose | Coverage Target |
-|---|---|---|---|
-| Unit Tests | JUnit 5 + Mockito + AssertJ | Specific examples, edge cases, error conditions | ≥ 80% line coverage |
-| Property-Based Tests | jqwik | Universal properties across generated inputs | 100 iterations per property |
+### Property-Based Tests (jqwik)
+- `InputValidatorPropertyTest` — Properties 1, 2, 3 (validation properties)
+- `StatusDeterminationPropertyTest` — Properties 4-9 (status determination and pending check)
+- `WorkflowRoutingPropertyTest` — Property 10 (routing logic)
 
-### Unit Test Coverage
-
-- **Validation logic**: Each API handler validates mandatory fields, invalid enums, edge cases (empty strings, null values)
-- **Status determination**: All 5 status outcomes + edge cases (single attribute, large attribute lists)
-- **Routing logic**: Each status routes to the correct next step
-- **Audit trail**: Entries created for each transition
-- **Error handling**: DynamoDB failures, Step Functions callback failures, external system failures
-- **Timestamp management**: UTC timestamps set correctly on create and update
-
-### Property-Based Test Coverage
-
-Each correctness property (1–12) maps to a dedicated jqwik property test:
-
-| Property | Test Class | Generator Strategy |
-|---|---|---|
-| P1: startPPAreview validation | `StartPPAReviewValidationProperties` | Generate payloads with random null/missing field combinations |
-| P2: Request type validation | `RequestTypeValidationProperties` | Generate arbitrary strings excluding valid values |
-| P3: assignToType validation | `AssignToTypeValidationProperties` | Generate payloads with random null/missing field combinations |
-| P4: getNextStep validation | `GetNextStepValidationProperties` | Generate payloads with random null/missing field combinations |
-| P5: Pending detection | `PendingAttributeDetectionProperties` | Generate attribute lists with random statuses |
-| P6: Status determination | `StatusDeterminationProperties` | Generate non-pending attribute lists with random statuses |
-| P7: Status routing | `StatusRoutingProperties` | Generate all valid terminal statuses |
-| P8: Audit trail completeness | `AuditTrailProperties` | Generate random sequences of status transitions |
-| P9: Timestamp invariant | `TimestampInvariantProperties` | Generate sequences of update operations |
-| P10: Response structure | `ApiResponseStructureProperties` | Generate random valid/invalid API requests |
-| P11: Error opacity | `ErrorResponseOpacityProperties` | Generate error scenarios, check response content |
-| P12: Invalid task number | `InvalidTaskNumberProperties` | Generate random non-existent task numbers |
+### Integration Tests
+- `WorkflowRepositoryIntegrationTest` — DynamoDB CRUD operations
+- `WorkflowEndToEndIntegrationTest` — Full workflow lifecycle with mocked AWS services
 
 ### Test Configuration
-
-- jqwik minimum iterations: 100 per property
-- Each property test tagged: `@Tag("Feature: ldc-loan-review-workflow, Property N: {title}")`
-- AssertJ assertions only (no Hamcrest, no JUnit assertions)
-- Constructor injection for test dependencies
-- No field-level `@Autowired`
+- jqwik: Minimum 100 iterations per property test
+- Mockito: Mock AWS SDK clients (StepFunctionsClient, DynamoDbClient)
+- AssertJ: Fluent assertions throughout
+- Coverage target: ≥ 80% on all new classes

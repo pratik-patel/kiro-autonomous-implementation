@@ -1,0 +1,156 @@
+{
+  "Comment": "LDC Loan Review Workflow State Machine",
+  "StartAt": "Initialize",
+  "States": {
+    "Initialize": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:ldc-workflow-handler",
+      "Parameters": {
+        "action": "PERSIST_INITIAL_STATE",
+        "requestNumber.$": "$.requestNumber",
+        "taskNumber.$": "$.taskNumber",
+        "loanNumber.$": "$.loanNumber"
+      },
+      "ResultPath": "$.initResult",
+      "Next": "WaitForAssignToType"
+    },
+    "WaitForAssignToType": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:ldc-workflow-handler",
+        "Payload": {
+          "action": "WAIT_CALLBACK",
+          "taskToken.$": "$$.Task.Token",
+          "requestNumber.$": "$.requestNumber",
+          "taskNumber.$": "$.taskNumber"
+        }
+      },
+      "ResultPath": "$.assignResult",
+      "Next": "PersistReviewType"
+    },
+    "PersistReviewType": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:ldc-workflow-handler",
+      "Parameters": {
+        "action": "PERSIST_REVIEW_TYPE",
+        "requestNumber.$": "$.requestNumber",
+        "taskNumber.$": "$.taskNumber",
+        "reviewType.$": "$.assignResult.reviewType"
+      },
+      "ResultPath": "$.persistReviewResult",
+      "Next": "WaitForDecision"
+    },
+    "WaitForDecision": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:ldc-workflow-handler",
+        "Payload": {
+          "action": "WAIT_CALLBACK",
+          "taskToken.$": "$$.Task.Token",
+          "requestNumber.$": "$.requestNumber",
+          "taskNumber.$": "$.taskNumber"
+        }
+      },
+      "ResultPath": "$.decisionResult",
+      "Next": "CheckPendingAttributes"
+    },
+    "CheckPendingAttributes": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:ldc-workflow-handler",
+      "Parameters": {
+        "action": "CHECK_PENDING",
+        "requestNumber.$": "$.requestNumber",
+        "taskNumber.$": "$.taskNumber"
+      },
+      "ResultPath": "$.pendingResult",
+      "Next": "HasPendingAttributes"
+    },
+    "HasPendingAttributes": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.pendingResult.hasPendingAttributes",
+          "BooleanEquals": true,
+          "Next": "WaitForDecision"
+        }
+      ],
+      "Default": "DetermineStatus"
+    },
+    "DetermineStatus": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:ldc-workflow-handler",
+      "Parameters": {
+        "action": "DETERMINE_STATUS",
+        "requestNumber.$": "$.requestNumber",
+        "taskNumber.$": "$.taskNumber"
+      },
+      "ResultPath": "$.statusResult",
+      "Next": "RouteByStatus"
+    },
+    "RouteByStatus": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.statusResult.requiresReclassConfirmation",
+          "BooleanEquals": true,
+          "Next": "WaitForReclassConfirmation"
+        }
+      ],
+      "Default": "UpdateExternalSystems"
+    },
+    "WaitForReclassConfirmation": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:ldc-workflow-handler",
+        "Payload": {
+          "action": "WAIT_CALLBACK",
+          "taskToken.$": "$$.Task.Token",
+          "requestNumber.$": "$.requestNumber",
+          "taskNumber.$": "$.taskNumber"
+        }
+      },
+      "ResultPath": "$.reclassResult",
+      "Next": "UpdateExternalSystems"
+    },
+    "UpdateExternalSystems": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:ldc-workflow-handler",
+      "Parameters": {
+        "action": "UPDATE_EXTERNAL",
+        "requestNumber.$": "$.requestNumber",
+        "taskNumber.$": "$.taskNumber"
+      },
+      "ResultPath": "$.externalResult",
+      "Next": "LogAuditTrail",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "ErrorState",
+          "ResultPath": "$.error"
+        }
+      ]
+    },
+    "LogAuditTrail": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:ldc-workflow-handler",
+      "Parameters": {
+        "action": "LOG_AUDIT",
+        "requestNumber.$": "$.requestNumber",
+        "taskNumber.$": "$.taskNumber"
+      },
+      "ResultPath": "$.auditResult",
+      "Next": "Success"
+    },
+    "Success": {
+      "Type": "Succeed"
+    },
+    "ErrorState": {
+      "Type": "Fail",
+      "Error": "WorkflowError",
+      "Cause": "An error occurred during workflow execution"
+    }
+  }
+}

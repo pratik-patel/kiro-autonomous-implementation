@@ -5,31 +5,15 @@ fileMatchPattern: "src/**/*.java"
 description: Project technology stack and standards
 ---
 
-# Crew Ops Lite: Project & Technology Guide
+# LDC: Project & Technology Guide
 
 ## Product Overview
 
-**Crew Ops Lite: Crew Reassignment Workflow**
+**LDC : LDC Workflow**
 
-A Spring Boot application that automates crew reassignment for disrupted flights. When a flight is delayed, canceled, or a crew member calls out sick, the system validates the disruption event, retrieves flight and crew data, and produces an assignment outcome or escalates to manual review.
+A Spring Boot application that automates LDC workflow. 
 
-### Core Problem
 
-Manual crew reassignment is slow and error-prone. Mistakes can violate FAA duty/rest rules or contractual constraints. This system provides rapid, compliant crew reassignment decisions.
-
-### Key Features
-
-- **Event Validation**: Validates disruption events for required fields, types, and business constraints
-- **Flight Data Retrieval**: Fetches flight details and validates consistency with event data
-- **Crew Data Retrieval**: Retrieves crew roster and filters by required roles
-- **Event Enrichment**: Combines event, flight, and crew data with metadata for downstream processing
-- **Audit Logging**: Persists validation decisions to DynamoDB for compliance and audit trails
-- **Error Handling**: Comprehensive error logging to CloudWatch and SNS notifications
-
-### Demo Scenario
-
-Input: Crew disruption event (e.g., captain sick call on DL123 departing in 90 minutes)
-Output: Assignment outcome with crew assignments or manual review escalation
 
 ### Deployment Target
 
@@ -137,10 +121,10 @@ terraform destroy          # Destroy infrastructure
 ## Project Structure
 
 ```
-crew-ops-lite/
+ldc-workflow/
 ├── src/
 │   ├── main/
-│   │   ├── java/com/crewops/
+│   │   ├── java/com/hex/
 │   │   │   ├── config/              # Spring configuration classes
 │   │   │   │   ├── CloudWatchConfig.java
 │   │   │   │   ├── DynamoDBConfig.java
@@ -187,7 +171,7 @@ crew-ops-lite/
 │   │   └── resources/
 │   │       └── application.yml      # Spring configuration
 │   └── test/
-│       ├── java/com/crewops/        # Unit and integration tests
+│       ├── java/com/hex/        # Unit and integration tests
 │       │   ├── exception/
 │       │   │   └── StagingExceptionTest.java
 │       │   ├── service/
