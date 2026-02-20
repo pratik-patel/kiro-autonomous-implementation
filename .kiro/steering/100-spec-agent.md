@@ -183,7 +183,7 @@ Each Requirement becomes a Jira Story visible to stakeholders, PMs, and business
 
 #### Acceptance Criteria
 
-Each criterion uses EARS patterns. Write criteria that are both technically precise AND understandable to a product owner. Only include the scenario categories below that are relevant to this requirement — do NOT add empty or forced sections.
+Each criterion uses EARS patterns. Write criteria that are both technically precise AND understandable to a product owner. Only include the scenario categories below that are relevant to this requirement — do NOT add empty or forced sections. Number criteria sequentially across all categories.
 
 **Happy Path:**
 1. WHEN [event], THE [System_Name] SHALL [response]
@@ -191,12 +191,13 @@ Each criterion uses EARS patterns. Write criteria that are both technically prec
 
 **Validation & Edge Cases:** _(include only if the requirement involves user input or boundary conditions)_
 3. WHEN [invalid input], THE [System_Name] SHALL [rejection with specific error]
+4. WHEN [boundary value], THE [System_Name] SHALL [expected behavior]
 
 **Business Rule Violations:** _(include only if business constraints apply)_
-4. IF [business rule violation], THEN THE [System_Name] SHALL [rejection with specific error]
+5. IF [business rule violation], THEN THE [System_Name] SHALL [rejection with specific error]
 
 **Error Handling:** _(include only if external dependencies or failure modes exist)_
-5. IF [failure condition], THEN THE [System_Name] SHALL [recovery action]
+6. IF [failure condition], THEN THE [System_Name] SHALL [recovery action]
 
 **Assumptions & Notes:**
 - [Any assumptions made, e.g., "Borrower has already completed identity verification"]
